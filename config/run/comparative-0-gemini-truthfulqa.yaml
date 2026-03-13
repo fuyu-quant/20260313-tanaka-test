@@ -1,0 +1,24 @@
+# Standard Chain-of-Thought - Baseline
+run_id: comparative-0-gemini-truthfulqa
+
+method:
+  type: standard_cot
+  name: Standard Chain-of-Thought
+  # Standard CoT parameters
+  num_self_consistency: 5
+  max_tokens_per_step: 150
+
+model:
+  name: gemini-2.5-flash
+  temperature: 0.7
+  max_output_tokens: 512
+
+dataset:
+  name: truthful_qa
+  split: validation
+  num_samples: 200  # full mode
+  seed: 42
+
+inference:
+  batch_size: 1
+  cache_dir: .cache

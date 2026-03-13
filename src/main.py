@@ -1,0 +1,63 @@
+"""Main orchestrator for EC-CoT experiments."""
+
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from pathlib import Path
+
+from src.inference import run_inference
+
+
+@hydra.main(version_base=None, config_path="../config", config_name="config")
+def main(cfg: DictConfig) -> None:
+    """
+    Main entry point for running a single experiment.
+
+    Handles mode overrides and delegates to appropriate runner.
+
+    Args:
+        cfg: Hydra configuration
+    """
+    print("=" * 80)
+    print(f"EC-CoT Experiment Runner")
+    print(f"Run ID: {cfg.run.run_id}")
+    print(f"Mode: {cfg.mode}")
+    print(f"Method: {cfg.method.type}")
+    print("=" * 80)
+
+    # Apply mode-specific overrides
+    if cfg.mode == "sanity":
+        print("Applying sanity mode overrides...")
+        # Reduce samples for quick validation
+        cfg.dataset.num_samples = min(10, cfg.dataset.num_samples)
+        # Set wandb project to avoid polluting full runs
+        if not cfg.wandb.project.endswith("-sanity"):
+            cfg.wandb.project = f"{cfg.wandb.project}-sanity"
+        print(f"  - num_samples: {cfg.dataset.num_samples}")
+        print(f"  - wandb.project: {cfg.wandb.project}")
+
+    elif cfg.mode == "pilot":
+        print("Applying pilot mode overrides...")
+        # Use 20% of samples (at least 50)
+        original_samples = cfg.dataset.num_samples
+        cfg.dataset.num_samples = max(50, int(original_samples * 0.2))
+        # Set wandb project to avoid polluting full runs
+        if not cfg.wandb.project.endswith("-pilot"):
+            cfg.wandb.project = f"{cfg.wandb.project}-pilot"
+        print(f"  - num_samples: {cfg.dataset.num_samples} (20% of {original_samples})")
+        print(f"  - wandb.project: {cfg.wandb.project}")
+
+    # Print final config
+    print("\nFinal Configuration:")
+    print(OmegaConf.to_yaml(cfg))
+    print("=" * 80)
+
+    # Run inference (this is an inference-only task)
+    run_inference(cfg)
+
+    print("\n" + "=" * 80)
+    print("Experiment completed successfully!")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,18 +1,18 @@
 # Main configuration for Hydra
-# This file will be populated by AI code generator based on experimental design
+# EC-CoT prompt tuning experiment
 
 defaults:
   - _self_
   - run: ???  # loads from config/run/, accessible as 'run=' in CLI
 
-# Execution mode: main, sanity, or pilot
-mode: main
+# Execution mode: full, sanity, or pilot
+mode: full
 
 # Results output directory
 results_dir: .research/results
 
-# WandB configuration (will be set by AI agent)
+# WandB configuration
 wandb:
-  entity: ???
-  project: ???
+  entity: airas
+  project: 20260313-tanaka-test
   mode: online
