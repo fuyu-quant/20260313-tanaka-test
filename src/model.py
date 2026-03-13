@@ -74,8 +74,55 @@ class GeminiModel:
                     prompt,
                     generation_config=generation_config,
                 )
-                return response.text.strip()
+                # [VALIDATOR FIX - Attempt 2]
+                # [PROBLEM]: All predictions are "A" - model might be blocked/empty
+                # [CAUSE]: response.text might fail if content is blocked or empty
+                # [FIX]: Check for blocked content and handle gracefully
+                #
+                # [OLD CODE]:
+                # return response.text.strip()
+                #
+                # [NEW CODE]:
+                # Check if response was blocked by safety filters
+                if not response.candidates:
+                    print(
+                        f"[WARNING] No candidates in response (likely blocked by safety filters)"
+                    )
+                    if attempt < retry_attempts - 1:
+                        wait_time = 2**attempt
+                        time.sleep(wait_time)
+                        continue
+                    return ""  # Return empty string if all attempts fail
+
+                candidate = response.candidates[0]
+
+                # Check finish reason
+                if hasattr(
+                    candidate, "finish_reason"
+                ) and candidate.finish_reason not in [1, "STOP"]:
+                    print(
+                        f"[WARNING] Unexpected finish_reason: {candidate.finish_reason}"
+                    )
+
+                # Try to get text
+                try:
+                    text = response.text.strip()
+                    if not text:
+                        print(f"[WARNING] Empty response text")
+                        if attempt < retry_attempts - 1:
+                            continue
+                    return text
+                except ValueError as ve:
+                    # response.text throws ValueError if there's no text part
+                    print(f"[WARNING] Could not extract text from response: {ve}")
+                    if attempt < retry_attempts - 1:
+                        wait_time = 2**attempt
+                        time.sleep(wait_time)
+                        continue
+                    return ""
+
             except Exception as e:
+                print(f"[ERROR] Attempt {attempt + 1}/{retry_attempts} failed: {e}")
                 if attempt < retry_attempts - 1:
                     wait_time = 2**attempt  # Exponential backoff
                     time.sleep(wait_time)

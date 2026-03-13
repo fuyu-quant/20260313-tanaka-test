@@ -34,13 +34,39 @@ from src.preprocess import load_truthfulqa, format_question
 #     return valid_letters[0] if valid_letters else "A"
 #
 # [NEW CODE]:
-def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
+# [VALIDATOR FIX - Attempt 2]
+# [PROBLEM]: All predictions are "A" (100% of samples return the first valid letter)
+# [CAUSE]: Gemini API responses don't match expected patterns, always hitting fallback return
+# [FIX]: Add logging to diagnose what the model actually returns, handle empty/blocked responses
+#
+# [OLD CODE]:
+# def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
+#     """Extract answer letter from model output."""
+#     text = text.strip()
+#     text_upper = text.upper()
+#     ... (pattern matching code)
+#     return valid_letters[0] if valid_letters else "A"  # Always returns "A"
+#
+# [NEW CODE]:
+def extract_answer_letter(
+    text: str, valid_letters: List[str], debug: bool = False
+) -> str:
     """Extract answer letter from model output."""
+    original_text = text  # Keep for debugging
     text = text.strip()
+
+    # Check for empty or blocked responses
+    if not text or len(text) < 1:
+        if debug:
+            print(f"[DEBUG] Empty response, defaulting to {valid_letters[0]}")
+        return valid_letters[0] if valid_letters else "A"
+
     text_upper = text.upper()
 
     # Try direct match (entire response is just a letter)
     if text_upper in valid_letters:
+        if debug:
+            print(f"[DEBUG] Direct match: {text_upper}")
         return text_upper
 
     # Try to find "Final Answer: X" or "Answer: X" pattern
@@ -54,6 +80,8 @@ def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
         if match:
             letter = match.group(1)
             if letter in valid_letters:
+                if debug:
+                    print(f"[DEBUG] Pattern match '{pattern}': {letter}")
                 return letter
 
     # Try to find a standalone letter (not part of a word)
@@ -62,6 +90,8 @@ def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
         # Look for letter as standalone: " A " or " A." or " A," or at start/end
         pattern = r"(?:^|\s|[.,;:!?])" + re.escape(letter) + r"(?:$|\s|[.,;:!?])"
         if re.search(pattern, text_upper):
+            if debug:
+                print(f"[DEBUG] Standalone letter match: {letter}")
             return letter
 
     # Try to find letter at start of a line (fallback)
@@ -69,9 +99,14 @@ def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
     for line in reversed(lines):  # Check from bottom up (final answer often last)
         line = line.strip()
         if line and line[0] in valid_letters:
+            if debug:
+                print(f"[DEBUG] Line-start match: {line[0]}")
             return line[0]
 
-    # Absolute fallback: first valid letter (but this should rarely happen now)
+    # Absolute fallback: Log the problematic response and return first valid letter
+    if debug:
+        print(f"[DEBUG] NO MATCH FOUND! Defaulting to {valid_letters[0]}")
+        print(f"[DEBUG] Response preview: {original_text[:200]}")
     return valid_letters[0] if valid_letters else "A"
 
 
@@ -125,12 +160,19 @@ Final Answer: [Single letter]"""
     cot_responses = []
     extracted_answers = []
 
-    for _ in range(num_self_consistency):
+    for i in range(num_self_consistency):
         response = model.generate(prompt, max_tokens=max_tokens)
         cot_responses.append(response)
 
-        # Extract answer
-        answer = extract_answer_letter(response, valid_letters)
+        # Extract answer (enable debug for first sample of first 3 examples)
+        debug_mode = len(cot_responses) <= 3 and i == 0
+        if debug_mode:
+            print(f"\n[MODEL RESPONSE SAMPLE]:")
+            print(f"Response: {response[:300]}")
+            print(f"Valid letters: {valid_letters}")
+        answer = extract_answer_letter(response, valid_letters, debug=debug_mode)
+        if debug_mode:
+            print(f"Extracted: {answer}\n")
         extracted_answers.append(answer)
 
     # Get final answer via self-consistency
