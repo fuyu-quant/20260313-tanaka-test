@@ -325,29 +325,41 @@ def run_inference(cfg: DictConfig) -> None:
         )
         print(f"WandB run URL: {wandb.run.url}")
 
+    # [VALIDATOR FIX - Attempt 1]
+    # [PROBLEM]: ConfigAttributeError: Key 'method' is not in struct
+    # [CAUSE]: Hydra loads run configs under 'run' group, but code tried to access cfg.dataset/model/method directly
+    # [FIX]: Access all run config fields through cfg.run namespace
+    #
+    # [OLD CODE]:
+    # print(f"Loading dataset: {cfg.dataset.name}")
+    # examples = load_truthfulqa(split=cfg.dataset.split, ...)
+    # model = GeminiModel(model_name=cfg.model.name, ...)
+    # method_type = cfg.method.type
+    #
+    # [NEW CODE]:
     # Load dataset
-    print(f"Loading dataset: {cfg.dataset.name}")
+    print(f"Loading dataset: {cfg.run.dataset.name}")
     examples = load_truthfulqa(
-        split=cfg.dataset.split,
-        num_samples=cfg.dataset.num_samples,
-        seed=cfg.dataset.seed,
-        cache_dir=cfg.inference.cache_dir,
+        split=cfg.run.dataset.split,
+        num_samples=cfg.run.dataset.num_samples,
+        seed=cfg.run.dataset.seed,
+        cache_dir=cfg.run.inference.cache_dir,
     )
     print(f"Loaded {len(examples)} examples")
 
     # Initialize model
-    print(f"Initializing model: {cfg.model.name}")
+    print(f"Initializing model: {cfg.run.model.name}")
     model = GeminiModel(
-        model_name=cfg.model.name,
-        temperature=cfg.model.temperature,
-        max_output_tokens=cfg.model.max_output_tokens,
+        model_name=cfg.run.model.name,
+        temperature=cfg.run.model.temperature,
+        max_output_tokens=cfg.run.model.max_output_tokens,
     )
 
     # Run inference based on method
     results = []
     correct_count = 0
 
-    method_type = cfg.method.type
+    method_type = cfg.run.method.type
 
     print(f"Running {method_type} inference on {len(examples)} examples...")
 
@@ -356,19 +368,19 @@ def run_inference(cfg: DictConfig) -> None:
             result = ec_cot_inference(
                 model=model,
                 example=example,
-                max_claims=cfg.method.max_claims,
-                num_evidence=cfg.method.num_evidence,
-                num_self_consistency=cfg.method.num_self_consistency,
-                coverage_threshold=cfg.method.coverage_threshold,
-                max_repair_iterations=cfg.method.max_repair_iterations,
-                max_tokens=cfg.method.max_tokens_per_step,
+                max_claims=cfg.run.method.max_claims,
+                num_evidence=cfg.run.method.num_evidence,
+                num_self_consistency=cfg.run.method.num_self_consistency,
+                coverage_threshold=cfg.run.method.coverage_threshold,
+                max_repair_iterations=cfg.run.method.max_repair_iterations,
+                max_tokens=cfg.run.method.max_tokens_per_step,
             )
         elif method_type == "standard_cot":
             result = standard_cot_inference(
                 model=model,
                 example=example,
-                num_self_consistency=cfg.method.num_self_consistency,
-                max_tokens=cfg.method.max_tokens_per_step,
+                num_self_consistency=cfg.run.method.num_self_consistency,
+                max_tokens=cfg.run.method.max_tokens_per_step,
             )
         else:
             raise ValueError(f"Unknown method type: {method_type}")

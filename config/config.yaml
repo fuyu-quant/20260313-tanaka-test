@@ -2,8 +2,7 @@
 # EC-CoT prompt tuning experiment
 
 defaults:
-  - _self_
-  - run: ???  # loads from config/run/, accessible as 'run=' in CLI
+  - run: ???  # loads from config/run/
 
 # Execution mode: full, sanity, or pilot
 mode: full
