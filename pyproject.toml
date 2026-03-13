@@ -17,3 +17,15 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# [VALIDATOR FIX - Attempt 1]
+# [PROBLEM]: Docker build failed during `uv sync` with error "Unable to determine which files to ship inside the wheel"
+# [CAUSE]: Hatchling cannot automatically find the package because there's no directory named `ec_cot_experiment` (project name with underscores). The code is in `src/` directory but hatchling needs explicit configuration.
+# [FIX]: Added `[tool.hatch.build.targets.wheel]` section specifying `packages = ["src"]` to tell hatchling where to find the package files.
+#
+# [OLD CODE]:
+# (no tool.hatch.build.targets.wheel section existed)
+#
+# [NEW CODE]:
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
