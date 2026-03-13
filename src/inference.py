@@ -61,13 +61,18 @@ def extract_answer_letter(
     text: str, valid_letters: List[str], debug: bool = False
 ) -> str:
     """Extract answer letter from model output with robust fallback strategies."""
-    # [VALIDATOR FIX - Attempt 4]
-    # [PROBLEM]: All predictions are "A" - always hitting fallback return
-    # [CAUSE]: Model responses might be formatted differently than expected patterns
-    # [FIX]: Add more flexible extraction, ALWAYS log when using fallback, try ALL valid letters equally
+    # [VALIDATOR FIX - Attempt 5]
+    # [PROBLEM]: All predictions are "A" - pattern matching extracts letter from echoed question choices
+    # [CAUSE]: Gemini echoes the question or lists choices (e.g., "A) First option"), and patterns like
+    #          r"^([A-E])[\s\.,\)\:]" match "A)" from the choices list, not the actual answer.
+    #          Previous attempts looked for ANY letter match, which always found "A" in the first choice.
+    # [FIX]: 1) Prioritize answer indicator patterns (Final Answer:, I choose, etc.) over generic letter matches
+    #        2) For generic patterns, search from the END of the response backwards (the answer comes last)
+    #        3) Ignore choice-list patterns like "A)" that appear early in the response
+    #        4) Add pattern for sentences containing "correct" or "is [letter]" near the end
     #
     # [OLD CODE]:
-    # (extensive pattern matching but still missing actual response format)
+    # (patterns searched in order, first match wins, so "A)" from echoed choices always matched first)
     #
     # [NEW CODE]:
     original_text = text  # Keep for debugging
@@ -89,38 +94,70 @@ def extract_answer_letter(
             print(f"[DEBUG] Direct match: {text_upper}")
         return text_upper
 
-    # Try to find "Final Answer: X" or "Answer: X" pattern with more flexibility
-    answer_patterns = [
-        r"FINAL\s*ANSWER\s*:?\s*([A-E])",
-        r"ANSWER\s*:?\s*([A-E])",
-        r"THE\s*ANSWER\s*IS\s*:?\s*([A-E])",
-        r"I\s+(?:CHOOSE|SELECT|PICK)\s*:?\s*([A-E])",
-        r"\*\*([A-E])\*\*",  # Bold formatting: **A**
-        r"\*([A-E])\*",  # Italic: *A*
-        r"OPTION\s*([A-E])",
-        r"CHOICE\s*([A-E])",
-        r"^([A-E])[\s\.,\)\:]",  # Letter at start followed by space/punctuation
-        r"[\n\r]([A-E])[\s\.,\)\:]",  # Letter at line start
+    # PRIORITY 1: Look for explicit answer indicators (high confidence patterns)
+    # These should be searched FIRST and are most likely to be the actual answer
+    high_confidence_patterns = [
+        r"FINAL\s*ANSWER\s*:?\s*\*?\*?([A-E])\*?\*?",  # Final Answer: A or **A**
+        r"(?:MY|THE)?\s*ANSWER\s*IS\s*:?\s*\*?\*?([A-E])\*?\*?",  # The answer is A
+        r"(?:I\s+)?(?:CHOOSE|SELECT|PICK)\s*:?\s*\*?\*?([A-E])\*?\*?",  # I choose A
+        r"CORRECT\s+(?:ANSWER|CHOICE|OPTION)\s+IS\s*:?\s*\*?\*?([A-E])\*?\*?",
+        r"\*\*([A-E])\*\*\s*(?:IS|CORRECT)",  # **B** is correct
     ]
-    for pattern in answer_patterns:
+    for pattern in high_confidence_patterns:
         match = re.search(pattern, text_upper)
         if match:
             letter = match.group(1)
             if letter in valid_letters:
                 if debug:
-                    print(f"[DEBUG] Pattern match '{pattern}': {letter}")
+                    print(f"[DEBUG] High-confidence pattern '{pattern}': {letter}")
                 return letter
 
-    # Try to find the LAST STANDALONE occurrence of any valid letter
-    # Look for letters that appear with word boundaries (not inside words)
+    # PRIORITY 2: Look for answer at the END of the response (last line/sentence)
+    # The actual answer is usually at the end, after the reasoning
+    last_200_chars = text_upper[-200:]  # Focus on the last part of the response
+    for pattern in high_confidence_patterns:
+        match = re.search(pattern, last_200_chars)
+        if match:
+            letter = match.group(1)
+            if letter in valid_letters:
+                if debug:
+                    print(f"[DEBUG] End-of-response pattern '{pattern}': {letter}")
+                return letter
+
+    # PRIORITY 3: Look for standalone letter at end of response (last occurrence)
+    # Search backwards from the end to avoid matching echoed question choices
+    lines = text_upper.split("\n")
+    for line in reversed(lines):  # Check from bottom up
+        line = line.strip()
+        # Look for a single letter on its own or with minimal surrounding text
+        # Avoid lines that look like choice listings (e.g., "A) Some option")
+        if line and len(line) <= 10:  # Short lines more likely to be just the answer
+            if line[0] in valid_letters and not any(
+                marker in line for marker in [")", "(", ".", ":", ";"]
+            ):
+                if debug:
+                    print(f"[DEBUG] Short line at end: {line[0]}")
+                return line[0]
+
+        # Look for patterns like "Therefore, C" or "Thus B" near the end
+        match = re.search(r"(?:THEREFORE|THUS|SO|HENCE),?\s*([A-E])\s*(?:\.|$)", line)
+        if match:
+            letter = match.group(1)
+            if letter in valid_letters:
+                if debug:
+                    print(f"[DEBUG] Conclusion pattern: {letter}")
+                return letter
+
+    # PRIORITY 4: Find the LAST standalone occurrence of any valid letter
+    # This avoids matching "A" from "A) First choice" which appears early
     last_standalone = {}
     for letter in valid_letters:
-        # Pattern: word boundary or punctuation before and after the letter
-        # More permissive: match letter preceded/followed by non-letter
-        pattern = r"(?:^|[^A-Z])" + re.escape(letter) + r"(?:[^A-Z]|$)"
+        # Look for standalone letter (not part of a choice listing like "A)")
+        # Match letter with non-letter or boundary before/after
+        pattern = r"(?<![A-Z0-9])" + re.escape(letter) + r"(?![A-Z0-9])"
         matches = list(re.finditer(pattern, text_upper))
         if matches:
-            # Get position of last match
+            # Get position of last match (closest to the end)
             last_standalone[letter] = matches[-1].start()
 
     if last_standalone:
@@ -132,29 +169,12 @@ def extract_answer_letter(
             )
         return last_letter
 
-    # Try any valid letter appearing standalone (broadest search)
-    for letter in valid_letters:
-        # Very permissive: any occurrence not surrounded by other letters
-        pattern = r"(?<![A-Z])" + re.escape(letter) + r"(?![A-Z])"
-        if re.search(pattern, text_upper):
-            if debug:
-                print(f"[DEBUG] Broad standalone match: {letter}")
-            return letter
-
-    # Try to find letter at start of any line
-    lines = text_upper.split("\n")
-    for line in reversed(lines):  # Check from bottom up
-        line = line.strip()
-        if line and line[0] in valid_letters:
-            if debug:
-                print(f"[DEBUG] Line-start match: {line[0]}")
-            return line[0]
-
     # CRITICAL: Absolute fallback should ALWAYS be logged loudly
     print(f"\n{'=' * 60}")
     print(f"[EXTRACTION FALLBACK TRIGGERED - THIS INDICATES A PROBLEM]")
     print(f"Response length: {len(original_text)} chars")
     print(f"Response preview (first 300 chars):\n{original_text[:300]}")
+    print(f"Response preview (last 300 chars):\n{original_text[-300:]}")
     print(f"Valid letters: {valid_letters}")
     print(f"Defaulting to: {valid_letters[0]}")
     print(f"{'=' * 60}\n")
