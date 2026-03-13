@@ -83,43 +83,73 @@ class GeminiModel:
                 # return response.text.strip()
                 #
                 # [NEW CODE]:
+                # [VALIDATOR FIX - Attempt 4]
+                # [PROBLEM]: All predictions are "A" - extraction fallback always triggers
+                # [CAUSE]: Response handling needs better logging and alternative text extraction
+                # [FIX]: Add comprehensive logging and try multiple ways to extract text
+                #
+                # [OLD CODE]:
+                # (basic blocked content checking without sufficient logging)
+                #
+                # [NEW CODE]:
                 # Check if response was blocked by safety filters
                 if not response.candidates:
                     print(
-                        f"[WARNING] No candidates in response (likely blocked by safety filters)"
+                        f"[WARNING] No candidates in response (likely blocked by safety filters) for prompt: {prompt[:100]}..."
                     )
                     if attempt < retry_attempts - 1:
                         wait_time = 2**attempt
                         time.sleep(wait_time)
                         continue
-                    return ""  # Return empty string if all attempts fail
+                    # Instead of returning empty, throw error to make blocking obvious
+                    raise RuntimeError(
+                        "Response blocked by safety filters after all attempts"
+                    )
 
                 candidate = response.candidates[0]
 
-                # Check finish reason
-                if hasattr(
-                    candidate, "finish_reason"
-                ) and candidate.finish_reason not in [1, "STOP"]:
+                # Check finish reason with detailed logging
+                finish_reason_name = getattr(candidate, "finish_reason", None)
+                if finish_reason_name not in [None, 1, "STOP"]:
                     print(
-                        f"[WARNING] Unexpected finish_reason: {candidate.finish_reason}"
+                        f"[WARNING] Unexpected finish_reason: {finish_reason_name} for prompt: {prompt[:100]}..."
                     )
 
-                # Try to get text
+                # Try multiple ways to extract text
+                text = None
                 try:
                     text = response.text.strip()
-                    if not text:
-                        print(f"[WARNING] Empty response text")
-                        if attempt < retry_attempts - 1:
-                            continue
-                    return text
                 except ValueError as ve:
                     # response.text throws ValueError if there's no text part
-                    print(f"[WARNING] Could not extract text from response: {ve}")
+                    print(
+                        f"[WARNING] response.text failed: {ve}. Trying alternative extraction..."
+                    )
+                    # Try to extract from parts directly
+                    if hasattr(candidate, "content") and hasattr(
+                        candidate.content, "parts"
+                    ):
+                        parts = candidate.content.parts
+                        if parts and hasattr(parts[0], "text"):
+                            text = parts[0].text.strip()
+                            print(f"[INFO] Extracted text from parts: {text[:100]}...")
+                except AttributeError as ae:
+                    print(f"[WARNING] AttributeError accessing response.text: {ae}")
+
+                # Validate we got text
+                if not text:
+                    print(
+                        f"[WARNING] Empty response text after all extraction attempts. Prompt: {prompt[:100]}..."
+                    )
                     if attempt < retry_attempts - 1:
                         wait_time = 2**attempt
                         time.sleep(wait_time)
                         continue
-                    return ""
+                    # Raise error instead of returning empty string
+                    raise RuntimeError(
+                        "Empty response after all attempts and extraction methods"
+                    )
+
+                return text
 
             except Exception as e:
                 print(f"[ERROR] Attempt {attempt + 1}/{retry_attempts} failed: {e}")

@@ -61,13 +61,24 @@ def extract_answer_letter(
     text: str, valid_letters: List[str], debug: bool = False
 ) -> str:
     """Extract answer letter from model output with robust fallback strategies."""
+    # [VALIDATOR FIX - Attempt 4]
+    # [PROBLEM]: All predictions are "A" - always hitting fallback return
+    # [CAUSE]: Model responses might be formatted differently than expected patterns
+    # [FIX]: Add more flexible extraction, ALWAYS log when using fallback, try ALL valid letters equally
+    #
+    # [OLD CODE]:
+    # (extensive pattern matching but still missing actual response format)
+    #
+    # [NEW CODE]:
     original_text = text  # Keep for debugging
     text = text.strip()
 
-    # Check for empty or blocked responses
+    # Check for empty or blocked responses - ALWAYS log this
     if not text or len(text) < 1:
-        if debug:
-            print(f"[DEBUG] Empty response, defaulting to {valid_letters[0]}")
+        print(f"[EXTRACTION ERROR] Empty response, defaulting to {valid_letters[0]}")
+        print(
+            f"  This suggests API failures or blocked content. Check model logs above."
+        )
         return valid_letters[0] if valid_letters else "A"
 
     text_upper = text.upper()
@@ -78,13 +89,18 @@ def extract_answer_letter(
             print(f"[DEBUG] Direct match: {text_upper}")
         return text_upper
 
-    # Try to find "Final Answer: X" or "Answer: X" pattern
+    # Try to find "Final Answer: X" or "Answer: X" pattern with more flexibility
     answer_patterns = [
-        r"FINAL\s*ANSWER\s*:?\s*([A-Z])",
-        r"ANSWER\s*:?\s*([A-Z])",
-        r"THE\s*ANSWER\s*IS\s*:?\s*([A-Z])",
-        r"\*\*([A-Z])\*\*",  # Bold formatting: **A**
-        r"^([A-Z])[\s\.,]",  # Letter at start followed by space/punctuation
+        r"FINAL\s*ANSWER\s*:?\s*([A-E])",
+        r"ANSWER\s*:?\s*([A-E])",
+        r"THE\s*ANSWER\s*IS\s*:?\s*([A-E])",
+        r"I\s+(?:CHOOSE|SELECT|PICK)\s*:?\s*([A-E])",
+        r"\*\*([A-E])\*\*",  # Bold formatting: **A**
+        r"\*([A-E])\*",  # Italic: *A*
+        r"OPTION\s*([A-E])",
+        r"CHOICE\s*([A-E])",
+        r"^([A-E])[\s\.,\)\:]",  # Letter at start followed by space/punctuation
+        r"[\n\r]([A-E])[\s\.,\)\:]",  # Letter at line start
     ]
     for pattern in answer_patterns:
         match = re.search(pattern, text_upper)
@@ -95,12 +111,13 @@ def extract_answer_letter(
                     print(f"[DEBUG] Pattern match '{pattern}': {letter}")
                 return letter
 
-    # NEW: Try to find the LAST STANDALONE occurrence of any valid letter
+    # Try to find the LAST STANDALONE occurrence of any valid letter
     # Look for letters that appear with word boundaries (not inside words)
     last_standalone = {}
     for letter in valid_letters:
-        # Pattern: word boundary before and after the letter, or with punctuation/spaces
-        pattern = r"(?:^|\W)" + re.escape(letter) + r"(?:\W|$)"
+        # Pattern: word boundary or punctuation before and after the letter
+        # More permissive: match letter preceded/followed by non-letter
+        pattern = r"(?:^|[^A-Z])" + re.escape(letter) + r"(?:[^A-Z]|$)"
         matches = list(re.finditer(pattern, text_upper))
         if matches:
             # Get position of last match
@@ -115,16 +132,16 @@ def extract_answer_letter(
             )
         return last_letter
 
-    # Try to find a standalone letter (not part of a word)
+    # Try any valid letter appearing standalone (broadest search)
     for letter in valid_letters:
-        # Look for letter as standalone: " A " or " A." or " A," or at start/end
-        pattern = r"(?:^|\s|[.,;:!?])" + re.escape(letter) + r"(?:$|\s|[.,;:!?])"
+        # Very permissive: any occurrence not surrounded by other letters
+        pattern = r"(?<![A-Z])" + re.escape(letter) + r"(?![A-Z])"
         if re.search(pattern, text_upper):
             if debug:
-                print(f"[DEBUG] Standalone letter match: {letter}")
+                print(f"[DEBUG] Broad standalone match: {letter}")
             return letter
 
-    # Try to find letter at start of a line
+    # Try to find letter at start of any line
     lines = text_upper.split("\n")
     for line in reversed(lines):  # Check from bottom up
         line = line.strip()
@@ -133,11 +150,14 @@ def extract_answer_letter(
                 print(f"[DEBUG] Line-start match: {line[0]}")
             return line[0]
 
-    # Absolute fallback: Log the problematic response and return first valid letter
-    if debug:
-        print(f"[DEBUG] NO MATCH FOUND! Defaulting to {valid_letters[0]}")
-        print(f"[DEBUG] Response preview: {original_text[:200]}")
-        print(f"[DEBUG] Valid letters: {valid_letters}")
+    # CRITICAL: Absolute fallback should ALWAYS be logged loudly
+    print(f"\n{'=' * 60}")
+    print(f"[EXTRACTION FALLBACK TRIGGERED - THIS INDICATES A PROBLEM]")
+    print(f"Response length: {len(original_text)} chars")
+    print(f"Response preview (first 300 chars):\n{original_text[:300]}")
+    print(f"Valid letters: {valid_letters}")
+    print(f"Defaulting to: {valid_letters[0]}")
+    print(f"{'=' * 60}\n")
     return valid_letters[0] if valid_letters else "A"
 
 
