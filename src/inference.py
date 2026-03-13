@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Dict, List, Any, Tuple
 from collections import Counter
@@ -13,25 +14,64 @@ from src.model import GeminiModel
 from src.preprocess import load_truthfulqa, format_question
 
 
+# [VALIDATOR FIX - Attempt 1]
+# [PROBLEM]: 100% accuracy - all predictions return the first valid letter (always "A")
+# [CAUSE]: "if letter in text" matches ANY occurrence (e.g., "A" in "ANSWER"), not just the predicted letter
+# [FIX]: Use regex to find standalone letter patterns, check "Final Answer:" line, avoid substring matches
+#
+# [OLD CODE]:
+# def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
+#     """Extract answer letter from model output."""
+#     text = text.strip().upper()
+#     if text in valid_letters:
+#         return text
+#     for letter in valid_letters:
+#         if text.startswith(letter):
+#             return letter
+#     for letter in valid_letters:
+#         if letter in text:
+#             return letter
+#     return valid_letters[0] if valid_letters else "A"
+#
+# [NEW CODE]:
 def extract_answer_letter(text: str, valid_letters: List[str]) -> str:
     """Extract answer letter from model output."""
-    text = text.strip().upper()
+    text = text.strip()
+    text_upper = text.upper()
 
-    # Try direct match
-    if text in valid_letters:
-        return text
+    # Try direct match (entire response is just a letter)
+    if text_upper in valid_letters:
+        return text_upper
 
-    # Try to find letter at start
+    # Try to find "Final Answer: X" or "Answer: X" pattern
+    answer_patterns = [
+        r"FINAL\s*ANSWER\s*:\s*([A-Z])",
+        r"ANSWER\s*:\s*([A-Z])",
+        r"THE\s*ANSWER\s*IS\s*([A-Z])",
+    ]
+    for pattern in answer_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            letter = match.group(1)
+            if letter in valid_letters:
+                return letter
+
+    # Try to find a standalone letter (not part of a word)
+    # Match single letters with word boundaries or punctuation
     for letter in valid_letters:
-        if text.startswith(letter):
+        # Look for letter as standalone: " A " or " A." or " A," or at start/end
+        pattern = r"(?:^|\s|[.,;:!?])" + re.escape(letter) + r"(?:$|\s|[.,;:!?])"
+        if re.search(pattern, text_upper):
             return letter
 
-    # Try to find letter anywhere
-    for letter in valid_letters:
-        if letter in text:
-            return letter
+    # Try to find letter at start of a line (fallback)
+    lines = text_upper.split("\n")
+    for line in reversed(lines):  # Check from bottom up (final answer often last)
+        line = line.strip()
+        if line and line[0] in valid_letters:
+            return line[0]
 
-    # Default to first option if no match
+    # Absolute fallback: first valid letter (but this should rarely happen now)
     return valid_letters[0] if valid_letters else "A"
 
 
@@ -361,7 +401,27 @@ def run_inference(cfg: DictConfig) -> None:
 
     method_type = cfg.run.method.type
 
+    # [VALIDATOR FIX - Attempt 1]
+    # [PROBLEM]: 100% accuracy on TruthfulQA (200/200 correct) - meaningless results
+    # [CAUSE]: Need to verify that predictions and ground truth vary across examples
+    # [FIX]: Add diagnostic logging to first 5 examples to verify data integrity
+    #
+    # [OLD CODE]:
+    # print(f"Running {method_type} inference on {len(examples)} examples...")
+    #
+    # [NEW CODE]:
     print(f"Running {method_type} inference on {len(examples)} examples...")
+
+    # Diagnostic: log first 3 examples to verify data
+    print("\n=== DIAGNOSTIC: First 3 examples ===")
+    for i in range(min(3, len(examples))):
+        ex = examples[i]
+        print(f"Example {i}:")
+        print(f"  Question: {ex['question'][:80]}...")
+        print(f"  Choices: {ex['choices']}")
+        print(f"  Correct answer: {ex['correct_answer']} (idx={ex['correct_idx']})")
+        print(f"  Choice letters: {ex['choice_letters']}")
+    print("=" * 50 + "\n")
 
     for idx, example in enumerate(tqdm(examples, desc="Inference")):
         if method_type == "ec_cot":
@@ -388,6 +448,14 @@ def run_inference(cfg: DictConfig) -> None:
         result["example_idx"] = idx
         result["question"] = example["question"]
         results.append(result)
+
+        # Diagnostic: log first 5 predictions
+        if idx < 5:
+            print(f"\nExample {idx} result:")
+            print(f"  Predicted: {result['final_answer']}")
+            print(f"  Correct: {result['correct_answer']}")
+            print(f"  Match: {result['is_correct']}")
+            print(f"  All answers sampled: {result.get('all_answers', [])}")
 
         if result["is_correct"]:
             correct_count += 1
@@ -453,20 +521,53 @@ def run_inference(cfg: DictConfig) -> None:
         wandb.summary.update(metrics)
         wandb.finish()
 
+    # [VALIDATOR FIX - Attempt 1]
+    # [PROBLEM]: Sanity validation passed despite 100% accuracy (meaningless results)
+    # [CAUSE]: Validation didn't check that outputs are diverse or that accuracy is reasonable
+    # [FIX]: Require outputs_unique=True and accuracy in reasonable range (0.2-0.8) for TruthfulQA
+    #
+    # [OLD CODE]:
+    # if len(results) >= 5 and all("final_answer" in r for r in results):
+    #     print("SANITY_VALIDATION: PASS")
+    # else:
+    #     print(f"SANITY_VALIDATION: FAIL reason=insufficient_samples")
+    #
+    # [NEW CODE]:
     # Validation output for sanity/pilot modes
     if cfg.mode == "sanity":
+        outputs_unique = len(set(r["final_answer"] for r in results)) > 1
+        correct_answers_unique = len(set(r["correct_answer"] for r in results)) > 1
+
         validation_summary = {
             "samples": len(results),
             "outputs_valid": all("final_answer" in r for r in results),
-            "outputs_unique": len(set(r["final_answer"] for r in results)) > 1,
+            "outputs_unique": outputs_unique,
+            "correct_answers_unique": correct_answers_unique,
             "accuracy": accuracy,
+            "unique_predictions": len(set(r["final_answer"] for r in results)),
+            "unique_ground_truth": len(set(r["correct_answer"] for r in results)),
         }
         print(f"SANITY_VALIDATION_SUMMARY: {json.dumps(validation_summary)}")
 
-        if len(results) >= 5 and all("final_answer" in r for r in results):
+        # Check for suspicious patterns
+        fail_reasons = []
+        if len(results) < 5:
+            fail_reasons.append("insufficient_samples")
+        if not all("final_answer" in r for r in results):
+            fail_reasons.append("invalid_outputs")
+        if not outputs_unique:
+            fail_reasons.append("all_predictions_identical")
+        if not correct_answers_unique:
+            fail_reasons.append("all_ground_truth_identical")
+        if accuracy > 0.95:
+            fail_reasons.append("suspiciously_high_accuracy")
+        if accuracy == 0.0:
+            fail_reasons.append("zero_accuracy")
+
+        if not fail_reasons:
             print("SANITY_VALIDATION: PASS")
         else:
-            print(f"SANITY_VALIDATION: FAIL reason=insufficient_samples")
+            print(f"SANITY_VALIDATION: FAIL reason={','.join(fail_reasons)}")
 
     elif cfg.mode == "pilot":
         validation_summary = {
