@@ -48,10 +48,19 @@ from src.preprocess import load_truthfulqa, format_question
 #     return valid_letters[0] if valid_letters else "A"  # Always returns "A"
 #
 # [NEW CODE]:
+# [VALIDATOR FIX - Attempt 3]
+# [PROBLEM]: All predictions are "A" (100% default fallback) - model responses not being parsed
+# [CAUSE]: Gemini's actual response format doesn't match any extraction patterns, always hitting fallback
+# [FIX]: Add more robust extraction that looks for ANY valid letter in the response, prioritize last occurrence
+#
+# [OLD CODE]:
+# (extensive pattern matching that still missed Gemini's actual response format)
+#
+# [NEW CODE]:
 def extract_answer_letter(
     text: str, valid_letters: List[str], debug: bool = False
 ) -> str:
-    """Extract answer letter from model output."""
+    """Extract answer letter from model output with robust fallback strategies."""
     original_text = text  # Keep for debugging
     text = text.strip()
 
@@ -71,9 +80,11 @@ def extract_answer_letter(
 
     # Try to find "Final Answer: X" or "Answer: X" pattern
     answer_patterns = [
-        r"FINAL\s*ANSWER\s*:\s*([A-Z])",
-        r"ANSWER\s*:\s*([A-Z])",
-        r"THE\s*ANSWER\s*IS\s*([A-Z])",
+        r"FINAL\s*ANSWER\s*:?\s*([A-Z])",
+        r"ANSWER\s*:?\s*([A-Z])",
+        r"THE\s*ANSWER\s*IS\s*:?\s*([A-Z])",
+        r"\*\*([A-Z])\*\*",  # Bold formatting: **A**
+        r"^([A-Z])[\s\.,]",  # Letter at start followed by space/punctuation
     ]
     for pattern in answer_patterns:
         match = re.search(pattern, text_upper)
@@ -84,8 +95,27 @@ def extract_answer_letter(
                     print(f"[DEBUG] Pattern match '{pattern}': {letter}")
                 return letter
 
+    # NEW: Try to find the LAST STANDALONE occurrence of any valid letter
+    # Look for letters that appear with word boundaries (not inside words)
+    last_standalone = {}
+    for letter in valid_letters:
+        # Pattern: word boundary before and after the letter, or with punctuation/spaces
+        pattern = r"(?:^|\W)" + re.escape(letter) + r"(?:\W|$)"
+        matches = list(re.finditer(pattern, text_upper))
+        if matches:
+            # Get position of last match
+            last_standalone[letter] = matches[-1].start()
+
+    if last_standalone:
+        # Get the letter that appears last as standalone in the text
+        last_letter = max(last_standalone.items(), key=lambda x: x[1])[0]
+        if debug:
+            print(
+                f"[DEBUG] Last standalone letter in text: {last_letter} at position {last_standalone[last_letter]}"
+            )
+        return last_letter
+
     # Try to find a standalone letter (not part of a word)
-    # Match single letters with word boundaries or punctuation
     for letter in valid_letters:
         # Look for letter as standalone: " A " or " A." or " A," or at start/end
         pattern = r"(?:^|\s|[.,;:!?])" + re.escape(letter) + r"(?:$|\s|[.,;:!?])"
@@ -94,9 +124,9 @@ def extract_answer_letter(
                 print(f"[DEBUG] Standalone letter match: {letter}")
             return letter
 
-    # Try to find letter at start of a line (fallback)
+    # Try to find letter at start of a line
     lines = text_upper.split("\n")
-    for line in reversed(lines):  # Check from bottom up (final answer often last)
+    for line in reversed(lines):  # Check from bottom up
         line = line.strip()
         if line and line[0] in valid_letters:
             if debug:
@@ -107,6 +137,7 @@ def extract_answer_letter(
     if debug:
         print(f"[DEBUG] NO MATCH FOUND! Defaulting to {valid_letters[0]}")
         print(f"[DEBUG] Response preview: {original_text[:200]}")
+        print(f"[DEBUG] Valid letters: {valid_letters}")
     return valid_letters[0] if valid_letters else "A"
 
 
@@ -132,6 +163,7 @@ def standard_cot_inference(
     example: Dict[str, Any],
     num_self_consistency: int = 5,
     max_tokens: int = 150,
+    example_idx: int = 0,
 ) -> Dict[str, Any]:
     """
     Standard Chain-of-Thought inference with self-consistency.
@@ -165,10 +197,12 @@ Final Answer: [Single letter]"""
         cot_responses.append(response)
 
         # Extract answer (enable debug for first sample of first 3 examples)
-        debug_mode = len(cot_responses) <= 3 and i == 0
+        # [VALIDATOR FIX - Attempt 3] Enable debug for ALL samples of first example to diagnose extraction
+        debug_mode = (example_idx == 0 and i < 2) or (example_idx < 3 and i == 0)
         if debug_mode:
-            print(f"\n[MODEL RESPONSE SAMPLE]:")
-            print(f"Response: {response[:300]}")
+            print(f"\n[MODEL RESPONSE SAMPLE - Example {example_idx}, Sample {i}]:")
+            print(f"Response length: {len(response)} chars")
+            print(f"Response: {response[:500] if len(response) > 500 else response}")
             print(f"Valid letters: {valid_letters}")
         answer = extract_answer_letter(response, valid_letters, debug=debug_mode)
         if debug_mode:
@@ -483,6 +517,7 @@ def run_inference(cfg: DictConfig) -> None:
                 example=example,
                 num_self_consistency=cfg.run.method.num_self_consistency,
                 max_tokens=cfg.run.method.max_tokens_per_step,
+                example_idx=idx,
             )
         else:
             raise ValueError(f"Unknown method type: {method_type}")
