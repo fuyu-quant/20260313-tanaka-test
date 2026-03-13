@@ -60,36 +60,88 @@ def load_truthfulqa(
             }
         )
 
-    # [VALIDATOR FIX - Attempt 2]
-    # [PROBLEM]: random.sample with seed=42 creates biased subset where all/most correct answers are "A"
-    # [CAUSE]: random.sample on pre-processed list doesn't guarantee representative sampling
-    # [FIX]: Use stratified sampling by taking evenly spaced indices to ensure answer diversity
+    # [VALIDATOR FIX - Attempt 3]
+    # [PROBLEM]: random.shuffle with seed=42 still creates biased subset where all correct answers are "A"
+    # [CAUSE]: Even with shuffle, seed=42 happens to select indices that map to examples with "A" answers
+    # [FIX]: Use true stratified sampling - group by correct_answer, then sample proportionally from each group
     #
     # [OLD CODE]:
-    # if num_samples is not None and num_samples < len(examples):
-    #     random.seed(seed)
-    #     examples = random.sample(examples, num_samples)
+    # random.seed(seed)
+    # indices = list(range(len(examples)))
+    # random.shuffle(indices)
+    # indices = indices[:num_samples]
+    # examples = [examples[i] for i in indices]
     #
     # [NEW CODE]:
     # Subsample if requested
     if num_samples is not None and num_samples < len(examples):
-        # Use stratified sampling: take evenly spaced indices to ensure diversity
-        # This prevents bias toward any particular answer letter
+        # Stratified sampling: ensure answer diversity by sampling proportionally from each answer group
         random.seed(seed)
-        # First shuffle to maintain randomness
-        indices = list(range(len(examples)))
-        random.shuffle(indices)
-        # Then take first num_samples (which are now randomly distributed)
-        indices = indices[:num_samples]
-        examples = [examples[i] for i in indices]
 
-        # Verify answer diversity (at least 2 unique correct answers in sample)
-        unique_answers = len(set(ex["correct_answer"] for ex in examples))
+        # Group examples by correct answer
+        answer_groups = {}
+        for ex in examples:
+            answer = ex["correct_answer"]
+            if answer not in answer_groups:
+                answer_groups[answer] = []
+            answer_groups[answer].append(ex)
+
+        # Calculate how many to sample from each group (proportional to group size)
+        total = len(examples)
+        samples_per_group = {}
+        for answer, group in answer_groups.items():
+            proportion = len(group) / total
+            samples_per_group[answer] = max(
+                1, int(num_samples * proportion)
+            )  # At least 1 from each group
+
+        # Adjust if we overallocated (due to rounding + "at least 1" constraint)
+        total_allocated = sum(samples_per_group.values())
+        if total_allocated > num_samples:
+            # Remove excess from largest groups
+            sorted_groups = sorted(
+                answer_groups.items(), key=lambda x: len(x[1]), reverse=True
+            )
+            excess = total_allocated - num_samples
+            for answer, _ in sorted_groups:
+                if excess == 0:
+                    break
+                if samples_per_group[answer] > 1:
+                    reduction = min(excess, samples_per_group[answer] - 1)
+                    samples_per_group[answer] -= reduction
+                    excess -= reduction
+
+        # Sample from each group
+        sampled = []
+        for answer, group in answer_groups.items():
+            n = min(samples_per_group[answer], len(group))
+            sampled.extend(random.sample(group, n))
+
+        # If we still need more samples (due to rounding), randomly add from remaining
+        if len(sampled) < num_samples:
+            remaining = num_samples - len(sampled)
+            all_remaining = [ex for ex in examples if ex not in sampled]
+            if all_remaining:
+                sampled.extend(
+                    random.sample(all_remaining, min(remaining, len(all_remaining)))
+                )
+
+        # Shuffle the final sample to avoid answer clustering
+        random.shuffle(sampled)
+        examples = sampled[:num_samples]
+
+        # Verify answer diversity
+        answer_dist = Counter(ex["correct_answer"] for ex in examples)
+        unique_answers = len(answer_dist)
+        print(
+            f"Sampled {len(examples)} examples with {unique_answers} unique correct answers"
+        )
+        print(f"  Answer distribution: {dict(answer_dist)}")
+
         if unique_answers < 2 and len(examples) >= 10:
             print(
                 f"WARNING: Only {unique_answers} unique correct answers in {len(examples)} samples!"
             )
-            print(f"  Distribution: {Counter(ex['correct_answer'] for ex in examples)}")
 
     return examples
 
