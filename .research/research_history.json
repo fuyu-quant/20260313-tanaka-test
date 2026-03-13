@@ -163,5 +163,109 @@
     "experimental_code": "import re\nimport random\nfrom collections import Counter\n\n# Replace with your LLM call\ndef llm(prompt: str) -> str:\n    raise NotImplementedError\n\nCHOICE_RE = re.compile(r\"\\b([A-E])\\b\", re.I)\n\ndef extract_choice(text: str):\n    m = CHOICE_RE.search(text.strip())\n    return m.group(1).upper() if m else None\n\ndef direct_prompt(q, choices):\n    return f\"Answer the multiple-choice question. Output ONLY the final letter.\\nQ: {q}\\nChoices: {choices}\\nFinal letter:\"\n\ndef draft_cot_prompt(q, choices):\n    return (\n        \"Solve with a SHORT chain of thought of 4-6 numbered steps. \"\n        \"Each step must be a single atomic claim. Then output ONLY the final letter on the last line as 'Final: X'.\\n\"\n        f\"Q: {q}\\nChoices: {choices}\\n\"\n    )\n\ndef extract_steps(cot_text: str):\n    # crude extraction of lines starting with digit.\n    steps = []\n    for line in cot_text.splitlines():\n        line = line.strip()\n        if re.match(r\"^\\d+\\.\", line):\n            steps.append(re.sub(r\"^\\d+\\.\\s*\", \"\", line))\n    return steps\n\ndef extract_final(cot_text: str):\n    m = re.search(r\"Final\\s*:\\s*([A-E])\\b\", cot_text, re.I)\n    return m.group(1).upper() if m else extract_choice(cot_text)\n\ndef claimify_prompt(steps):\n    joined = \"\\n\".join(f\"{i+1}. {s}\" for i, s in enumerate(steps))\n    return (\n        \"Rewrite each step into a concise checkable claim (no extra reasoning). \"\n        \"Output as a numbered list of claims, one per line.\\n\"\n        f\"Steps:\\n{joined}\\nClaims:\"\n    )\n\ndef parse_numbered_list(text: str):\n    items = []\n    for line in text.splitlines():\n        line = line.strip()\n        if re.match(r\"^\\d+\\.\", line):\n            items.append(re.sub(r\"^\\d+\\.\\s*\", \"\", line))\n    return items\n\ndef evidence_prompt(q, claims, m=6):\n    cl = \"\\n\".join(f\"- {c}\" for c in claims)\n    return (\n        f\"Generate {m} short commonsense/science evidence statements that would help verify the claims for the question. \"\n        \"Each evidence must be 1 sentence, and you must not mention answer letters.\\n\"\n        f\"Question: {q}\\nClaims:\\n{cl}\\n\\nEvidence (numbered 1..{m}):\"\n    )\n\ndef parse_evidence(text: str):\n    ev = []\n    for line in text.splitlines():\n        line = line.strip()\n        if re.match(r\"^\\d+\\.\", line):\n            ev.append(re.sub(r\"^\\d+\\.\\s*\", \"\", line))\n    return ev\n\ndef coverage_prompt(claims, evidence):\n    cl = \"\\n\".join(f\"{i+1}. {c}\" for i, c in enumerate(claims))\n    ev = \"\\n\".join(f\"{i+1}. {e}\" for i, e in enumerate(evidence))\n    return (\n        \"For each claim, decide if it is SUPPORTED, CONTRADICTED, or NOT-ENOUGH-INFO using ONLY the evidence. \"\n        \"Output one line per claim: i) LABEL (evidence_id or '-')\\n\"\n        f\"Claims:\\n{cl}\\n\\nEvidence:\\n{ev}\\n\\nJudgments:\"\n    )\n\ndef parse_judgments(text: str, n_claims: int):\n    labels = [\"NOT-ENOUGH-INFO\"] * n_claims\n    cited = [None] * n_claims\n    for line in text.splitlines():\n        line = line.strip()\n        m = re.match(r\"^(\\d+)\\)\\s*(SUPPORTED|CONTRADICTED|NOT-ENOUGH-INFO)\\s*(?:\\((\\d+)\\)|\\((-)\\))?\", line, re.I)\n        if m:\n            i = int(m.group(1)) - 1\n            if 0 <= i < n_claims:\n                labels[i] = m.group(2).upper()\n                cited[i] = None if m.group(4) == \"-\" else (int(m.group(3)) if m.group(3) else None)\n    return labels, cited\n\ndef self_consistency_answer(q, choices, n=5):\n    ans = [extract_choice(llm(direct_prompt(q, choices))) for _ in range(n)]\n    ans = [a for a in ans if a]\n    if not ans:\n        return None, 0.0\n    c = Counter(ans)\n    top, cnt = c.most_common(1)[0]\n    return top, cnt / len(ans)\n\ndef minimal_repair_prompt(q, choices, claims, evidence, labels):\n    cl = \"\\n\".join(f\"{i+1}. {c} [{labels[i]}]\" for i, c in enumerate(claims))\n    ev = \"\\n\".join(f\"{i+1}. {e}\" for i, e in enumerate(evidence))\n    return (\n        \"You must revise the reasoning by REMOVING or EDITING only claims that are CONTRADICTED or NOT-ENOUGH-INFO. \"\n        \"Then answer in <=3 steps, and each step must cite an evidence id like [E2]. \"\n        \"Finally output ONLY 'Final: X'.\\n\"\n        f\"Q: {q}\\nChoices: {choices}\\n\\nClaims with labels:\\n{cl}\\n\\nEvidence:\\n{ev}\\n\"\n    )\n\ndef ec_cot(q, choices, m=6, n_sc=5, cov_tau=0.6):\n    draft = llm(draft_cot_prompt(q, choices))\n    steps = extract_steps(draft)\n    draft_ans = extract_final(draft)\n\n    if not steps:\n        # fallback\n        a, stab = self_consistency_answer(q, choices, n=n_sc)\n        return a, {\"route\": \"fallback\", \"coverage\": 0.0, \"stability\": stab}\n\n    claims = parse_numbered_list(llm(claimify_prompt(steps)))\n    claims = claims[:6] if claims else steps[:6]\n\n    evidence = parse_evidence(llm(evidence_prompt(q, claims, m=m)))\n    evidence = evidence[:m]\n\n    judg = llm(coverage_prompt(claims, evidence))\n    labels, _ = parse_judgments(judg, len(claims))\n\n    supported = sum(1 for x in labels if x == \"SUPPORTED\")\n    contrad = any(x == \"CONTRADICTED\" for x in labels)\n    coverage = supported / max(1, len(claims))\n\n    sc_ans, stability = self_consistency_answer(q, choices, n=n_sc)\n\n    # Trigger minimal repair when under-supported or contradicted\n    if coverage < cov_tau or contrad:\n        repaired = llm(minimal_repair_prompt(q, choices, claims, evidence, labels))\n        rep_ans = extract_final(repaired)\n        # prefer repaired only if it aligns with stability or increases stability proxy\n        if rep_ans and (rep_ans == sc_ans or stability < 0.6):\n            return rep_ans, {\"route\": \"repair\", \"coverage\": coverage, \"stability\": stability}\n\n    # otherwise keep stable answer if present, else draft\n    out = sc_ans if sc_ans else draft_ans\n    return out, {\"route\": \"no_repair\", \"coverage\": coverage, \"stability\": stability}\n\n# Evaluation scaffold:\n# data = [{\"q\":..., \"choices\":\"A) ... B) ...\", \"gold\":\"C\"}, ...]\n# correct = 0\n# for ex in data[:200]:\n#     pred, info = ec_cot(ex[\"q\"], ex[\"choices\"])\n#     correct += int(pred == ex[\"gold\"])\n# print(\"accuracy\", correct/200)\n",
     "expected_result": "Across 200-item subsets:\n- CommonsenseQA: Direct 55%, CoT 58%, GKP+CoT 60%, Self-Consistency 62%, CW-GK-CoT 65%, EC-CoT 68% (+3 over CW-GK-CoT; +6 over Self-Consistency).\n- ARC-Easy: Direct 63%, CoT 65%, GKP+CoT 67%, Self-Consistency 69%, CW-GK-CoT 70%, EC-CoT 73%.\nSecondary: mean evidence coverage increases from ~0.45 (plain CoT, judged) / ~0.52 (GKP+CoT) to ~0.70 (EC-CoT); contradiction rate drops by ~30% relative (e.g., 0.20→0.14). Token cost: EC-CoT kept within ~1.2× Self-Consistency by allowing at most one repair and using short steps; on easy/high-coverage items it matches baseline cost.",
     "expected_conclusion": "Enforcing and optimizing *evidence coverage* at the level of individual reasoning claims is a more human-aligned and diagnostically meaningful control signal than global answer agreement alone. EC-CoT contributes a prompt-only, script-verifiable framework that (i) detects under-supported or contradictory reasoning traces, (ii) performs targeted minimal repairs rather than longer unconstrained CoT, and (iii) improves accuracy while reducing hallucinated intermediate steps. This is more novel than simple uncertainty gating because it introduces an explicit intermediate objective (coverage) and a localized repair policy, and more significant because it produces not only better final answers but also measurably more grounded rationales—directly relevant to safer QA deployments under no fine-tuning constraints."
+  },
+  "experimental_design": {
+    "experiment_summary": "Task: multiple-choice question answering where the model must output the correct option letter (A–D/E) given a natural-language question and answer choices.\n\nPurpose: demonstrate that Evidence-Coverage Chain-of-Thought (EC-CoT)—a prompt-only controller that scores step-wise evidence coverage and performs minimal targeted repair—improves (i) final answer accuracy and (ii) faithfulness/groundedness of the rationale compared to a strong prompt-only baseline.\n\nWorkflow (per example):\n1) Draft CoT: model produces 4–6 numbered atomic steps + final answer letter.\n2) Claim extraction: model rewrites each step into a checkable claim (proposition/triple).\n3) Micro-evidence generation: model generates a small list of short evidence statements conditioned on the claims.\n4) Coverage scoring: model labels each claim as SUPPORTED/CONTRADICTED/NOT-ENOUGH-INFO using only the evidence list; compute coverage = SUPPORTED/total.\n5) Adaptive minimal repair: if coverage below threshold or any contradiction, regenerate evidence only for problematic claims and re-derive answer in ≤3 cited steps.\n6) Output selection: return repaired answer only if it improves coverage and does not reduce answer stability (measured by short-answer self-consistency).\n\nExperimental scale tuned to fit a constrained Runner environment:\n- Use exactly 1 dataset: TruthfulQA (validation split, 200 questions subsampled with a fixed seed).\n- Use exactly 1 model: gemini-2.5-flash (fast/low-cost) with capped tokens per call.\n- Bound compute by limiting: max 1 repair iteration, evidence m=6, self-consistency n=5, max claims=6, and strict short outputs. This yields a fixed upper bound on number of LLM calls per item (baseline ≤6 calls; proposed ≤9 calls) and keeps runtime feasible on a single CPU runner with API access.",
+    "compute_environment": {},
+    "evaluation_metrics": [
+      {
+        "name": "accuracy",
+        "description": "Correctness criteria: a prediction is correct if the produced multiple-choice letter (A/B/C/D or A–E depending on dataset item) exactly matches the dataset’s gold label after normalization to uppercase and extracting the first standalone letter token.\n\nCalculation method: accuracy = (1/N) * Σ_i 1[pred_i == gold_i]. Report overall accuracy on the 200-item evaluation subset.\n\nTask appropriateness: the task is discrete multiple-choice QA; accuracy directly measures end-task success and is the primary metric in the hypothesis.\n\nRelevant visualizations: bar chart of accuracy by method; optional per-category accuracy bars using TruthfulQA categories if available; bootstrap 95% CI error bars."
+      },
+      {
+        "name": "Mean Evidence Coverage",
+        "description": "Correctness criteria: for each example, each extracted claim is judged (by the same model under a constrained prompt) as SUPPORTED / CONTRADICTED / NOT-ENOUGH-INFO using only the generated evidence list.\n\nCalculation method: for example i with K_i claims, coverage_i = (#SUPPORTED)/K_i. Mean Evidence Coverage = (1/N) * Σ_i coverage_i.\n\nTask appropriateness: measures how well the intermediate reasoning trace is grounded by explicit evidence, targeting the paper’s key mechanism (step-wise evidence coverage).\n\nRelevant visualizations: histogram/violin plot of coverage distributions per method; scatter plot of coverage vs. correctness (colored by correct/incorrect) with trend line."
+      },
+      {
+        "name": "Contradiction Rate",
+        "description": "Correctness criteria: an example is marked contradictory if any claim receives label CONTRADICTED under the evidence-based judgment prompt.\n\nCalculation method: contradiction_rate = (1/N) * Σ_i 1[∃ claim labeled CONTRADICTED].\n\nTask appropriateness: captures overt internal inconsistency between rationale claims and provided evidence, a common failure mode for persuasive but unsupported CoT.\n\nRelevant visualizations: bar chart of contradiction rate by method; stacked bar of {SUPPORTED, NEI, CONTRADICTED} proportions aggregated over all claims."
+      },
+      {
+        "name": "Coverage→Correctness AUROC",
+        "description": "Correctness criteria: treat coverage_i as a continuous score predicting whether the final answer is correct (y_i ∈ {0,1}).\n\nCalculation method: compute AUROC of the classifier score=coverage_i against label y_i using standard ROC integration (e.g., sklearn.metrics.roc_auc_score). If all coverages are tied, report AUROC as 0.5.\n\nTask appropriateness: tests the hypothesis that evidence coverage is a meaningful calibration/diagnostic signal beyond final accuracy.\n\nRelevant visualizations: ROC curve plot for each method that produces coverage (EC-CoT and any baseline variant that includes coverage scoring); reliability-style bin plot: bucket coverage into deciles and plot empirical accuracy per bucket."
+      },
+      {
+        "name": "Average Tokens per Question",
+        "description": "Correctness criteria: count total tokens (input+output) used across all LLM calls per example, using the provider’s usage metadata when available; otherwise approximate by a tokenizer (e.g., tiktoken-like estimate) consistently for all methods.\n\nCalculation method: avg_tokens = (1/N) * Σ_i tokens_i.\n\nTask appropriateness: ensures improvements are achieved with bounded extra compute, central to the hypothesis (prompt-only with bounded extra tokens).\n\nRelevant visualizations: boxplot of tokens per question by method; scatter of tokens vs. correctness to show whether gains are due to excessive compute."
+      }
+    ],
+    "models_to_use": [
+      "gemini-2.5-flash (~unknown params)"
+    ],
+    "datasets_to_use": [
+      "TruthfulQA (validation; 200-question subsample)"
+    ],
+    "proposed_method": {
+      "method_name": "EC-CoT (Evidence-Coverage Chain-of-Thought)",
+      "description": "Prompt-only controller that enforces step-wise evidence coverage for a short CoT. It extracts atomic claims, generates claim-conditioned micro-evidence, scores each claim as supported/contradicted/NEI, and performs a single minimal targeted repair on only unsupported/contradicted claims, selecting the final answer using a stability gate (short-answer self-consistency). Novelty: explicit per-claim evidence coverage objective and localized repair rather than global self-consistency or unconditioned generated-knowledge prompting.",
+      "optuna_config": {
+        "enabled": true,
+        "n_trials": 20,
+        "search_spaces": [
+          {
+            "param_name": "m_evidence",
+            "distribution_type": "int",
+            "low": 4.0,
+            "high": 10.0
+          },
+          {
+            "param_name": "n_self_consistency",
+            "distribution_type": "int",
+            "low": 3.0,
+            "high": 7.0
+          },
+          {
+            "param_name": "coverage_threshold",
+            "distribution_type": "uniform",
+            "low": 0.4,
+            "high": 0.8
+          },
+          {
+            "param_name": "max_claims",
+            "distribution_type": "int",
+            "low": 4.0,
+            "high": 8.0
+          },
+          {
+            "param_name": "repair_enabled",
+            "distribution_type": "categorical",
+            "choices": [
+              0,
+              1
+            ]
+          }
+        ]
+      }
+    },
+    "comparative_methods": [
+      {
+        "method_name": "Self-Consistency CoT (SC-CoT)",
+        "description": "Prompt-only baseline: sample n short direct-answer completions (or short CoT completions) and output the majority-vote answer letter. Does not evaluate or repair intermediate reasoning; relies on agreement as a proxy for correctness.",
+        "optuna_config": {
+          "enabled": true,
+          "n_trials": 20,
+          "search_spaces": [
+            {
+              "param_name": "n_self_consistency",
+              "distribution_type": "int",
+              "low": 3.0,
+              "high": 15.0
+            },
+            {
+              "param_name": "sampling_temperature",
+              "distribution_type": "uniform",
+              "low": 0.3,
+              "high": 1.0
+            },
+            {
+              "param_name": "max_output_tokens",
+              "distribution_type": "int",
+              "low": 16.0,
+              "high": 128.0
+            }
+          ]
+        }
+      }
+    ]
   }
 }
