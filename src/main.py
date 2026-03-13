@@ -34,8 +34,22 @@ def main(cfg: DictConfig) -> None:
     print(f"Method: {cfg.run.method.type}")
     print("=" * 80)
 
+    # [VALIDATOR FIX - Attempt 2]
+    # [PROBLEM]: Mode was "sanity_check" but code only checked for "sanity", so validation didn't run
+    # [CAUSE]: GitHub Actions passes "sanity_check" as mode, but code expected "sanity"
+    # [FIX]: Normalize mode to handle both "sanity" and "sanity_check" variants
+    #
+    # [OLD CODE]:
+    # if cfg.mode == "sanity":
+    #
+    # [NEW CODE]:
+    # Normalize mode names
+    mode = cfg.mode.replace("_check", "").replace("-check", "")
+    if mode == "sanity":
+        cfg.mode = "sanity"  # Normalize for downstream checks
+
     # Apply mode-specific overrides
-    if cfg.mode == "sanity":
+    if mode == "sanity":
         print("Applying sanity mode overrides...")
         # Reduce samples for quick validation
         cfg.run.dataset.num_samples = min(10, cfg.run.dataset.num_samples)
@@ -45,7 +59,7 @@ def main(cfg: DictConfig) -> None:
         print(f"  - num_samples: {cfg.run.dataset.num_samples}")
         print(f"  - wandb.project: {cfg.wandb.project}")
 
-    elif cfg.mode == "pilot":
+    elif mode == "pilot":
         print("Applying pilot mode overrides...")
         # Use 20% of samples (at least 50)
         original_samples = cfg.run.dataset.num_samples

@@ -533,10 +533,36 @@ def run_inference(cfg: DictConfig) -> None:
     #     print(f"SANITY_VALIDATION: FAIL reason=insufficient_samples")
     #
     # [NEW CODE]:
+    # [VALIDATOR FIX - Attempt 2]
+    # [PROBLEM]: Mode was "sanity_check" but code checked for "sanity", so validation didn't execute
+    # [CAUSE]: GitHub Actions passes mode="sanity_check" but code expected "sanity"
+    # [FIX]: Normalize mode check to handle "sanity_check" or "sanity"
+    #
+    # [OLD CODE]:
+    # if cfg.mode == "sanity":
+    #
+    # [NEW CODE]:
     # Validation output for sanity/pilot modes
-    if cfg.mode == "sanity":
+    if cfg.mode in ("sanity", "sanity_check"):
         outputs_unique = len(set(r["final_answer"] for r in results)) > 1
         correct_answers_unique = len(set(r["correct_answer"] for r in results)) > 1
+
+        # [VALIDATOR FIX - Attempt 2]
+        # [PROBLEM]: 100% accuracy with all answers="A" - data sampling bias not detected
+        # [CAUSE]: random.sample with seed=42 selected a biased subset where nearly all correct answers are "A"
+        # [FIX]: Add check for single-letter dominance in both predictions and ground truth
+        #
+        # [OLD CODE]:
+        # validation_summary = { ... }
+        #
+        # [NEW CODE]:
+        # Count letter distributions
+        pred_counter = Counter(r["final_answer"] for r in results)
+        truth_counter = Counter(r["correct_answer"] for r in results)
+        most_common_pred = pred_counter.most_common(1)[0] if pred_counter else ("?", 0)
+        most_common_truth = (
+            truth_counter.most_common(1)[0] if truth_counter else ("?", 0)
+        )
 
         validation_summary = {
             "samples": len(results),
@@ -546,6 +572,8 @@ def run_inference(cfg: DictConfig) -> None:
             "accuracy": accuracy,
             "unique_predictions": len(set(r["final_answer"] for r in results)),
             "unique_ground_truth": len(set(r["correct_answer"] for r in results)),
+            "most_common_prediction": f"{most_common_pred[0]}({most_common_pred[1]}/{len(results)})",
+            "most_common_truth": f"{most_common_truth[0]}({most_common_truth[1]}/{len(results)})",
         }
         print(f"SANITY_VALIDATION_SUMMARY: {json.dumps(validation_summary)}")
 
@@ -559,6 +587,11 @@ def run_inference(cfg: DictConfig) -> None:
             fail_reasons.append("all_predictions_identical")
         if not correct_answers_unique:
             fail_reasons.append("all_ground_truth_identical")
+        # [VALIDATOR FIX - Attempt 2] Check for letter dominance (>80% of any single letter)
+        if most_common_pred[1] > len(results) * 0.8:
+            fail_reasons.append(f"prediction_dominated_by_{most_common_pred[0]}")
+        if most_common_truth[1] > len(results) * 0.8:
+            fail_reasons.append(f"ground_truth_dominated_by_{most_common_truth[0]}")
         if accuracy > 0.95:
             fail_reasons.append("suspiciously_high_accuracy")
         if accuracy == 0.0:

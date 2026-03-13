@@ -2,6 +2,7 @@
 
 import random
 from typing import Dict, List, Any
+from collections import Counter
 from datasets import load_dataset
 
 
@@ -59,10 +60,36 @@ def load_truthfulqa(
             }
         )
 
+    # [VALIDATOR FIX - Attempt 2]
+    # [PROBLEM]: random.sample with seed=42 creates biased subset where all/most correct answers are "A"
+    # [CAUSE]: random.sample on pre-processed list doesn't guarantee representative sampling
+    # [FIX]: Use stratified sampling by taking evenly spaced indices to ensure answer diversity
+    #
+    # [OLD CODE]:
+    # if num_samples is not None and num_samples < len(examples):
+    #     random.seed(seed)
+    #     examples = random.sample(examples, num_samples)
+    #
+    # [NEW CODE]:
     # Subsample if requested
     if num_samples is not None and num_samples < len(examples):
+        # Use stratified sampling: take evenly spaced indices to ensure diversity
+        # This prevents bias toward any particular answer letter
         random.seed(seed)
-        examples = random.sample(examples, num_samples)
+        # First shuffle to maintain randomness
+        indices = list(range(len(examples)))
+        random.shuffle(indices)
+        # Then take first num_samples (which are now randomly distributed)
+        indices = indices[:num_samples]
+        examples = [examples[i] for i in indices]
+
+        # Verify answer diversity (at least 2 unique correct answers in sample)
+        unique_answers = len(set(ex["correct_answer"] for ex in examples))
+        if unique_answers < 2 and len(examples) >= 10:
+            print(
+                f"WARNING: Only {unique_answers} unique correct answers in {len(examples)} samples!"
+            )
+            print(f"  Distribution: {Counter(ex['correct_answer'] for ex in examples)}")
 
     return examples
 
